@@ -1,0 +1,22 @@
+# Secrets: never commit
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Generated audio and logs
+out/
+*.log
+npm-debug.log*
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
