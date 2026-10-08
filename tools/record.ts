@@ -6,27 +6,37 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
   return {
     saveCallerDetails: llm.tool({
       description:
-        'Save details the caller has just stated about themselves: their name, how they want to be addressed, ' +
-        'age, a family member or carer who looks after them, or allergies. ' +
-        'Call it as soon as the caller says one of these. Only include fields the caller actually said. ' +
-        'Never guess. Do not announce that you are saving anything.',
+        'MUST be called the moment the caller states their name, how they want to be addressed, age, ' +
+        'a family member or carer who looks after them, or allergies. ' +
+        'This applies to any sentence, even a greeting such as "hi my name is Tom", "I am Tom" or "call me Tom". ' +
+        'Call it BEFORE you reply. Call it again if the caller corrects a detail. ' +
+        'Only include fields the caller actually said. Never guess. Do not announce that you are saving anything.',
       parameters: ProfilePatch,
       execute: async (patch) => {
         try {
-          await upsertProfile(callerId, patch, getLang());
+          await upsertProfile(callerId, patch, getLang(), callId);
           console.log('[records] profile saved:', Object.keys(patch).join(', '));
-          return { saved: true };
+          return {
+            saved: true,
+            next:
+              'Continue the conversation naturally. If you now know their name, use it warmly. ' +
+              'Do not mention that anything was saved.',
+          };
         } catch (err) {
           console.error('[records] profile save failed:', err);
-          return { saved: false };
+          return {
+            saved: false,
+            next: 'Continue the conversation naturally. Do not mention any problem with saving.',
+          };
         }
       },
     }),
 
     reportIncident: llm.tool({
       description:
-        'Record an emergency, injury, fall, severe pain, feeling unsafe, mental-health concern, or medication problem ' +
-        'that the caller reports. Call it IMMEDIATELY when the caller mentions one, before anything else. ' +
+        'Record an emergency, injury, fall, getting hurt, bleeding, severe pain, feeling unsafe, mental-health concern, ' +
+        'or medication problem that the caller reports. Call it IMMEDIATELY when the caller mentions one, ' +
+        'even if the wording is short or vague (for example "I got hurt"), before anything else. ' +
         'Describe only what the caller said. Do not diagnose and do not include medicine names or doses.',
       parameters: IncidentInput,
       execute: async (incident) => {
@@ -37,7 +47,7 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
             saved: true,
             next:
               'Stay calm and kind. If the caller may be in immediate danger, tell them to call the emergency number 112 now. ' +
-              'Otherwise advise contacting the clinic directly. Do not give medical advice or a diagnosis.',
+              'Otherwise advise contacting the clinic directly. Do not give medical advice, first-aid instructions or a diagnosis.',
           };
         } catch (err) {
           console.error('[records] incident save failed:', err);

@@ -12,7 +12,14 @@ import { translate, TRANSLATE_LANGS } from './translate.js';
 import { retrieve } from './rag/kb.js';
 import { hashCallerId, recentMemories, formatMemoryBlock, saveMemories, warmMemory } from './memory/memory.js';
 import { buildRecordTools } from './tools/record.js';
-import { saveRecordFromTranscript } from './memory/records.js';
+import {
+  saveRecordFromTranscript,
+  upsertProfile,
+  getProfile,
+  formatProfileBlock,
+  getRecentIncidents,
+  formatIncidentBlock,
+} from './memory/records.js';
 
 // auto = start in AGENT_LANGUAGE, then follow the caller's language
 const AUTO = (process.env.LANG_MODE ?? 'fixed') === 'auto';
@@ -30,7 +37,12 @@ const MEMORY_MIN_USER_TURNS = Number(process.env.MEMORY_MIN_USER_TURNS ?? 2);
 const SAVE_EVERY_TURNS = Number(process.env.MEMORY_SAVE_EVERY_TURNS ?? 4); // snapshot during the call
 
 // Fixed record (name, emergencies, injuries, ...). RECORDS_ENABLED=false turns it off.
+// Note: records need a caller ID, which is only built when MEMORY_ENABLED=true.
 const RECORDS_ENABLED = (process.env.RECORDS_ENABLED ?? 'true') !== 'false';
+
+// Backup for the name: if the model skips saveCallerDetails, a simple English pattern saves it.
+// Set NAME_FALLBACK=false to turn it off.
+const NAME_FALLBACK = (process.env.NAME_FALLBACK ?? 'true') !== 'false';
 
 // Who is the caller?
 //   test        = TEST_CALLER_ID from .env (change it to switch persona)
@@ -60,6 +72,20 @@ const BYE_WORDS =
 
 // Only short utterances count, so "bye" inside a long sentence doesn't hang up.
 const isBye = (t: string) => t.trim().split(/\s+/).length <= 8 && BYE_WORDS.test(t);
+
+// English-only backup for the name. Deliberately strict: only "my name is X" / "call me X".
+const NAME_STOPWORDS = new Set([
+  'a', 'an', 'the', 'not', 'sorry', 'fine', 'good', 'ok', 'okay', 'back', 'later', 'now', 'please',
+  'tomorrow', 'today', 'when', 'if', 'at', 'in', 'on', 'so', 'very', 'just', 'here', 'there',
+  'and', 'but', 'still', 'really', 'asha', 'what', 'who', 'why', 'how', 'something', 'anything',
+]);
+function extractSpokenName(text: string): string | null {
+  const m = text.match(/\b(?:my name is|my name's|call me)\s+([A-Za-z][A-Za-z'-]{1,29})\b/i);
+  if (!m) return null;
+  const w = m[1].toLowerCase();
+  if (NAME_STOPWORDS.has(w) || w.endsWith('ing')) return null;
+  return w.charAt(0).toUpperCase() + w.slice(1);
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -208,6 +234,9 @@ export default defineAgent({
     if (MEMORY_ENABLED && !rawCallerId) {
       console.warn('[memory] MEMORY_ENABLED is true but no caller ID is available, so memory is OFF for this run');
     }
+    if (!MEMORY_ENABLED && RECORDS_ENABLED) {
+      console.warn('[records] RECORDS_ENABLED is true but MEMORY_ENABLED is false, so no caller ID exists and records are OFF');
+    }
     // Unique per session, so a new session never counts as the previous call.
     const callId = `${ctx.room.name ?? 'unknown'}-${Date.now()}`;
     const transcriptLines: string[] = [];
@@ -309,6 +338,17 @@ export default defineAgent({
       if (role === 'user') {
         userTurns++;
         if (isBye(text)) void endCall('caller said bye');
+
+        // Backup: save the name even if the model skipped the saveCallerDetails tool.
+        if (NAME_FALLBACK && callerHash && RECORDS_ENABLED) {
+          const spoken = extractSpokenName(text);
+          if (spoken) {
+            upsertProfile(callerHash, { name: spoken }, current, callId)
+              .then(() => console.log(`[records] name saved by fallback: ${spoken}`))
+              .catch((e) => console.warn('[records] fallback name save failed:', e instanceof Error ? e.message : e));
+          }
+        }
+
         if (callerHash && userTurns >= MEMORY_MIN_USER_TURNS && userTurns % SAVE_EVERY_TURNS === 0) {
           void saveSnapshot();
         }
@@ -359,13 +399,18 @@ export default defineAgent({
     // Tells the LLM when to use the record tools. It never promises that staff will see anything.
     if (callerHash && RECORDS_ENABLED) {
       instructions +=
-        '\n\nRECORD KEEPING: When the caller tells you their name, age, carer or allergies, call saveCallerDetails. ' +
-        'If they mention an emergency, injury, fall, severe pain or feeling unsafe, call reportIncident immediately, ' +
+        '\n\nRECORD KEEPING: The moment the caller says their name (for example "my name is Tom", "I am Tom", "call me Tom"), ' +
+        'your first action must be to call saveCallerDetails with { name }, before you say anything. ' +
+        'Do the same for age, carer (caregiverName, caregiverRelation) and allergies. ' +
+        'Example: caller says "hi my name is tom" -> call saveCallerDetails({ name: "Tom" }), then greet Tom warmly. ' +
+        'If they mention an emergency, injury, getting hurt, bleeding, a fall, severe pain or feeling unsafe, ' +
+        'call reportIncident immediately, even if the wording is short or vague, ' +
         'then calmly tell them to call 112 if in immediate danger, or to contact the clinic directly. ' +
-        'Never diagnose or give medical advice. Do not announce that you are saving notes.';
+        'Never diagnose. Never give medical advice or first-aid instructions. Do not announce that you are saving notes.';
     }
 
-    // Load notes about this caller once, at the start. If slow or failing, carry on without it.
+    // Load what we already know about this caller, once, at the start.
+    // If slow or failing, carry on without it.
     if (callerHash) {
       try {
         const mems = await withTimeout(recentMemories(callerHash, 4), MEMORY_LOAD_TIMEOUT_MS);
@@ -373,6 +418,24 @@ export default defineAgent({
         instructions += formatMemoryBlock(mems);
       } catch (e) {
         console.warn('[memory] load skipped:', e instanceof Error ? e.message : e);
+      }
+
+      if (RECORDS_ENABLED) {
+        try {
+          const profile = await withTimeout(getProfile(callerHash), MEMORY_LOAD_TIMEOUT_MS);
+          console.log(`[records] profile loaded: ${profile ? Object.keys(profile).join(', ') : 'none'}`);
+          instructions += formatProfileBlock(profile);
+        } catch (e) {
+          console.warn('[records] profile load skipped:', e instanceof Error ? e.message : e);
+        }
+
+        try {
+          const inc = await withTimeout(getRecentIncidents(callerHash, 3), MEMORY_LOAD_TIMEOUT_MS);
+          console.log(`[records] ${inc.length} recent incident(s) loaded`);
+          instructions += formatIncidentBlock(inc);
+        } catch (e) {
+          console.warn('[records] incident load skipped:', e instanceof Error ? e.message : e);
+        }
       }
     }
 
