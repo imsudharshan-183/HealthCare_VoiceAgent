@@ -67,3 +67,4 @@ export async function embed(texts: string[], kind: Kind = 'document'): Promise<n
   );
   return d.data.map((x: any) => x.embedding);
 }
+
