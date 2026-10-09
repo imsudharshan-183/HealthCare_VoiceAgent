@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
 import { embed, EMBED_DIM } from '../rag/embed.js';
 import { getDb } from '../rag/store.js';
@@ -45,10 +44,8 @@ async function col() {
   return (await getDb()).collection<MemoryDoc>('memories');
 }
 
-// ---------- identity: hash it, never store the raw number ----------
-export function hashCallerId(raw: string): string {
-  return createHash('sha256').update(`${process.env.MEMORY_SALT ?? ''}:${raw}`).digest('hex');
-}
+// ---------- identity: delegate to caller.js ----------
+export { hashCallerId, resolveCallerId } from './caller.js';
 
 // ---------- safety filter: no medical data in memory ----------
 // Layer 1 is the extraction prompt. Layer 2 is this denylist. It is NOT complete: extend it.

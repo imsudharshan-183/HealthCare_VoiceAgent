@@ -1,7 +1,9 @@
 import 'dotenv/config';
-import { hashCallerId, saveMemories, recall, forgetCaller, isSafeMemory } from './memory.js';
+import { resolveCallerId } from './caller.js';
+import { saveMemories, recall, forgetCaller, isSafeMemory } from './memory.js';
 
-const id = hashCallerId('test-caller-memory');
+const { rawId, callerHash: id } = resolveCallerId('test-caller-memory-isolated');
+console.log(`[test-memory] rawId: "${rawId}", callerHash: "${id.slice(0, 8)}..."`);
 
 const transcript = `
 Caller: Hello, please call me Lakshmi amma.
@@ -26,5 +28,7 @@ for (const t of ['Takes metformin 500 mg daily', 'Has high sugar level', 'ती
   console.log(isSafeMemory(t), '|', t);
 }
 
-if (process.argv.includes('--clean')) console.log('deleted', await forgetCaller(id));
+// Clean up only its own isolated memories
+console.log('--- cleanup');
+console.log('deleted test memories:', await forgetCaller(id));
 process.exit(0);

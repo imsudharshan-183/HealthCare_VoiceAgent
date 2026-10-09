@@ -39,7 +39,8 @@
     "kb:ingest": "tsx rag/ingest.ts",
     "kb:test": "tsx rag/kb-test.ts",
     "records:test": "tsx memory/records-test.ts",
-    "records:show": "tsx memory/records-show.ts"
+    "records:show": "tsx memory/records-show.ts",
+    "profile:reset": "tsx memory/profile-reset.ts"
   },
   "keywords": [],
   "author": "",
