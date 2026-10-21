@@ -13,7 +13,7 @@ export const ASSISTANT_NAME = process.env.ASSISTANT_NAME ?? 'Asha';
 export const CLINIC_NAME = process.env.CLINIC_NAME ?? 'our clinic';
 
 // ---------- Sarvam API ----------
-export const SARVAM_API_KEY = process.env.SARVAM_API_KEY!;
+export const SARVAM_API_KEY = process.env.SARVAM_API_KEY || '';
 
 // ---------- Knowledge base (RAG) ----------
 export const ENABLE_KB = (process.env.ENABLE_KB ?? 'true') !== 'false';
@@ -47,9 +47,11 @@ export const CALLER_ID_MODE = process.env.CALLER_ID_MODE ?? 'test';
 export const TEST_CALLER_ID = process.env.TEST_CALLER_ID?.trim() ?? '';
 export const NAME_FALLBACK = (process.env.NAME_FALLBACK ?? 'true') !== 'false';
 
-// ---------- Call limits ----------
+// ---------- Call limits & Audio Endpointing ----------
 export const SILENCE_TIMEOUT_MS = Number(process.env.SILENCE_TIMEOUT_MS ?? 10000);
 export const MAX_CALL_MS = Number(process.env.MAX_CALL_MS ?? 10 * 60 * 1000);
+export const ENDPOINTING_MIN_DELAY = Number(process.env.ENDPOINTING_MIN_DELAY ?? 1000); // 1.0s pause before response, better for elderly pacing
+export const ENDPOINTING_MAX_DELAY = Number(process.env.ENDPOINTING_MAX_DELAY ?? 4000);
 
 // ---------- Language detection ----------
 export const SWITCH_MIN_LETTERS = Number(process.env.SWITCH_MIN_LETTERS ?? 4);
@@ -65,5 +67,5 @@ export const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // ---------- MongoDB ----------
-export const MONGODB_URI = process.env.MONGODB_URI!;
+export const MONGODB_URI = process.env.MONGODB_URI || '';
 export const MONGODB_DB = process.env.MONGODB_DB ?? 'hcva';

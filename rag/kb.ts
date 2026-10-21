@@ -1,8 +1,8 @@
 import { embed, EMBED_DIM } from './embed.js';
 import { getDb } from './store.js';
+import { KB_MIN_SCORE } from '../config.js';
 
 export const KB_INDEX = 'kb_vec';
-const KB_MIN_SCORE = Number(process.env.KB_MIN_SCORE ?? 0.5);
 
 type KbDoc = { source: string; chunkIdx: number; text: string; embedding: number[]; createdAt: Date };
 const col = async () => (await getDb()).collection<KbDoc>('kb');

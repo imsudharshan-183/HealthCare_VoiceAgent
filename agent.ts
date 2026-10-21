@@ -22,6 +22,8 @@ import {
   NAME_FALLBACK,
   SILENCE_TIMEOUT_MS,
   MAX_CALL_MS,
+  ENDPOINTING_MIN_DELAY,
+  ENDPOINTING_MAX_DELAY,
 } from './config.js';
 import { sarvamClient } from './sarvam-client.js';
 import { LANGS, buildPrompt, buildMultiPrompt } from './prompts/index.js';
@@ -196,7 +198,7 @@ export default defineAgent({
       }),
       tts,
       turnHandling: {
-        endpointing: { minDelay: 800, maxDelay: 4000 },
+        endpointing: { minDelay: ENDPOINTING_MIN_DELAY, maxDelay: ENDPOINTING_MAX_DELAY },
         interruption: { mode: 'adaptive', minDuration: 500 },
       },
     });
