@@ -25,31 +25,41 @@ Built with LiveKit Agents (Node.js / TypeScript), Sarvam AI for speech and langu
 | Mobile app and website integration | Planned |
 | Telephony (SIP) for phone calls | Planned |
 
-## Features
+## Architecture & Workflow
 
-- **Voice pipeline:** Sarvam STT (saaras:v3), Sarvam LLM (sarvam-105b), Sarvam TTS (bulbul:v3), Silero VAD
-- **Languages:** English, Hindi, Tamil, Kannada, Bengali, Marathi, Malayalam
-- **Health information (RAG):** answers from a curated knowledge base in `knowledge/` using MongoDB Atlas Vector Search
-- **Memory:** saves short notes about each user and loads them in later sessions
-- **Records:** stores user details (name, age, contacts, allergies) and reports incidents such as falls or emergencies
-- **Tools:** current date and time, knowledge lookup, simple non-medical translation
-- **Call control:** silence timeout, maximum call length, goodbye detection
+```mermaid
+flowchart TD
+    User([Caller Voice]) -->|Audio Stream| VAD[Silero VAD\nVoice Detection]
+    VAD -->|Speech| STT[Sarvam STT\nsaaras:v3]
+    STT -->|Transcribed Text| Agent[LiveKit Voice Agent\nSession Orchestrator]
 
-## Planned design
+    subgraph Startup & Context
+        DB[(MongoDB Atlas)] -->|Parallel Fetch| Ctx[Profile, Contacts,\nMemories, Past Calls]
+        Ctx --> Agent
+    end
 
+    subgraph Decision & Tools
+        Agent -->|Prompt + Context| LLM[Sarvam LLM\nsarvam-105b]
+        LLM -.->|Clinic Queries| RAG[Clinic RAG Tool]
+        LLM -.->|Save Info / Alerts| Rec[Record & Incident Tools]
+        LLM -.->|Past Recalls| Recall[Transcript Search Tool]
+    end
+
+    LLM -->|Text Response\n<= 25 words| TTS[Sarvam TTS\nbulbul:v3]
+    TTS -->|Synthesized Audio| AudioOut([Caller Hears Voice])
 ```
- App / Website (voice + chat)
-            |
-      LiveKit Agent  <---->  MongoDB Atlas
-            |                (profiles, memory, results, reminders)
-   +--------+---------+
-   |        |         |
-Reminders  Results   Escalation
-scheduler  rules      + consent-based
-           engine     contact notification
-```
 
-### Safety design for result explanations
+### Core Components
+
+| Component | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Transport** | LiveKit Agents | WebRTC real-time audio pipeline & turn handling |
+| **Speech (STT / TTS)** | Sarvam AI (`saaras:v3` / `bulbul:v3`) | Indian-accented speech recognition & natural voice synthesis |
+| **Intelligence** | Sarvam LLM (`sarvam-105b`) | Fast conversational inference with zero-thinking overhead |
+| **Memory & Store** | MongoDB Atlas | Caller profiles, contact lists, incident reports, and vector embeddings |
+| **Central Config** | `config.ts` | Unified single source of truth for all runtime settings |
+
+### Safety Design
 
 - **Flags come from code, not the LLM.** A rules engine compares readings with reference ranges and assigns a severity (normal, mild, severe). The LLM only explains the outcome in plain language.
 - **No diagnosis.** The agent says a reading is outside the usual range and suggests seeing a doctor. It does not name conditions.
@@ -57,16 +67,18 @@ scheduler  rules      + consent-based
 - **Consent first.** Sharing with contacts requires explicit consent that is stored, logged and revocable.
 - **Transparency.** The agent identifies itself as an AI and states its limits at the start of a session.
 
-## Project structure
+## Project Structure
 
 ```
-agent.ts          Main LiveKit agent
+agent.ts          Main LiveKit agent orchestrator
+config.ts         Central environment variable configuration
+sarvam-client.ts  Shared Sarvam LLM client
 lang.ts           Language detection
 translate.ts      Translation helper
-prompts/          Base prompt and per-language prompts
+prompts/          Base prompt and per-language modules
 rag/              Embedding, ingestion and retrieval for the knowledge base
-memory/           User memory and records (MongoDB)
-tools/            Agent tools (record keeping)
+memory/           User memory, profile/contact records, and transcripts (MongoDB)
+tools/            Agent tools (record keeping, clinic info, recall)
 knowledge/        Knowledge base content
 scenario.yaml     Simulation scenarios
 eval*.ts          Evals
@@ -98,7 +110,7 @@ LIVEKIT_API_SECRET=
 # Models
 SARVAM_API_KEY=
 
-# Database (check memory/memory.ts and rag/store.ts for the exact variable names)
+# Database
 MONGODB_URI=
 
 # Agent
@@ -125,7 +137,7 @@ Notes:
 - Use `CALLER_ID_MODE=participant` in production so each user has their own memory.
 - `LANG_MODE=auto` starts in `AGENT_LANGUAGE` and follows the user's language.
 
-## Knowledge base setup
+## Knowledge Base Setup
 
 1. Edit the files in `knowledge/` with your content.
 2. Create the memory collections: `npm run memory:setup`
@@ -178,7 +190,7 @@ Add your secrets (Sarvam key, MongoDB URI and the rest of `.env`) through LiveKi
 5. SIP telephony, semantic turn detection and noise cancellation
 6. Human handoff for emergencies
 
-## Privacy and compliance
+## Privacy and Compliance
 
 - User IDs are hashed before they are stored.
 - Do not commit `.env` or real patient data.
