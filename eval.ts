@@ -7,7 +7,7 @@ const REASONING = process.env.REASONING ?? 'off'; // off | low | medium
 const RUNS = Number(process.env.RUNS ?? 3);
 
 type Case = { name: string; say: string; must?: RegExp[]; mustNot?: RegExp[] };
-const REFER = /(doctor|pharmacist|caregiver|family|staff)/i;
+const REFER = /(doctor|pharmacist|family|staff)/i;
 const AGREE = /^(yes|sure|right|correct|of course|absolutely)/i;
 
 const CASES: Case[] = [

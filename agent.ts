@@ -1,18 +1,38 @@
-import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { defineAgent, cli, ServerOptions, voice, llm, type JobContext, type JobProcess } from '@livekit/agents';
 import * as sarvam from '@livekit/agents-plugin-sarvam';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
-import OpenAI from 'openai';
 import { z } from 'zod';
+import {
+  LANG_MODE,
+  AGENT_LANGUAGE,
+  ENABLE_TRANSLATE,
+  AGENT_NAME,
+  ENABLE_KB,
+  KB_TOOL_TIMEOUT_MS,
+  MEMORY_ENABLED,
+  MEMORY_LOAD_TIMEOUT_MS,
+  MEMORY_MIN_USER_TURNS,
+  MEMORY_SAVE_EVERY_TURNS,
+  RECORDS_ENABLED,
+  RECALL_TRANSCRIPTS,
+  CALLER_ID_MODE,
+  TEST_CALLER_ID,
+  NAME_FALLBACK,
+  SILENCE_TIMEOUT_MS,
+  MAX_CALL_MS,
+} from './config.js';
+import { sarvamClient } from './sarvam-client.js';
 import { LANGS, buildPrompt, buildMultiPrompt } from './prompts/index.js';
 import { detectLanguage } from './lang.js';
 import { translate, TRANSLATE_LANGS } from './translate.js';
 import { retrieve } from './rag/kb.js';
-import { hashCallerId, recentMemories, formatMemoryBlock, saveMemories, warmMemory } from './memory/memory.js';
+import { recentMemories, formatMemoryBlock, saveMemories, warmMemory } from './memory/memory.js';
 import { resolveCallerId } from './memory/caller.js';
 import { buildRecordTools } from './tools/record.js';
+import { buildRecallTool } from './tools/recall.js';
+import { SessionTranscript, getRecentExchanges, formatTranscriptBlock } from './memory/transcripts.js';
 import {
   saveRecordFromTranscript,
   upsertProfile,
@@ -27,39 +47,8 @@ import {
 } from './memory/records.js';
 
 // auto = start in AGENT_LANGUAGE, then follow the caller's language
-const AUTO = (process.env.LANG_MODE ?? 'fixed') === 'auto';
-const L = LANGS[process.env.AGENT_LANGUAGE ?? 'en-IN'] ?? LANGS['en-IN'];
-const ENABLE_TRANSLATE = (process.env.ENABLE_TRANSLATE ?? 'true') !== 'false';
-
-// Knowledge-base (RAG) settings
-const ENABLE_KB = (process.env.ENABLE_KB ?? 'true') !== 'false';
-const KB_TOOL_TIMEOUT_MS = Number(process.env.KB_TOOL_TIMEOUT_MS ?? 4000);
-
-// Memory settings
-const MEMORY_ENABLED = (process.env.MEMORY_ENABLED ?? 'false') === 'true';
-const MEMORY_LOAD_TIMEOUT_MS = Number(process.env.MEMORY_LOAD_TIMEOUT_MS ?? 2000);
-const MEMORY_MIN_USER_TURNS = Number(process.env.MEMORY_MIN_USER_TURNS ?? 2);
-const SAVE_EVERY_TURNS = Number(process.env.MEMORY_SAVE_EVERY_TURNS ?? 4); // snapshot during the call
-
-// Fixed record (name, emergencies, injuries, ...). RECORDS_ENABLED=false turns it off.
-// Note: records need a caller ID, which is only built when MEMORY_ENABLED=true.
-const RECORDS_ENABLED = (process.env.RECORDS_ENABLED ?? 'true') !== 'false';
-
-// Backup for the name: if the model skips saveProfile, a simple English pattern saves it.
-// Set NAME_FALLBACK=false to turn it off.
-const NAME_FALLBACK = (process.env.NAME_FALLBACK ?? 'true') !== 'false';
-
-// Who is the caller?
-//   test        = TEST_CALLER_ID from .env (change it to switch persona)
-//   participant = LiveKit participant "userId" attribute, else identity
-const CALLER_ID_MODE = process.env.CALLER_ID_MODE ?? 'test';
-
-// Dispatch name. Must match AGENT_NAME in hc-web/.env.local (blank = automatic dispatch).
-const AGENT_NAME = process.env.AGENT_NAME ?? 'hc-va';
-
-// Hang-up settings
-const SILENCE_MS = Number(process.env.SILENCE_TIMEOUT_MS ?? 10000);
-const MAX_CALL_MS = Number(process.env.MAX_CALL_MS ?? 10 * 60 * 1000);
+const AUTO = LANG_MODE === 'auto';
+const L = LANGS[AGENT_LANGUAGE] ?? LANGS['en-IN'];
 
 // Goodbye lines: have a native speaker check these.
 const BYE_LINE: Record<string, string> = {
@@ -79,13 +68,12 @@ const BYE_WORDS =
 const isBye = (t: string) => t.trim().split(/\s+/).length <= 8 && BYE_WORDS.test(t);
 
 // English-only backup. Deliberately strict.
-//   "my name is X"  -> name
-//   "call me X"     -> preferredName (so "actually call me Thomas" never replaces the full name)
 const NAME_STOPWORDS = new Set([
   'a', 'an', 'the', 'not', 'sorry', 'fine', 'good', 'ok', 'okay', 'back', 'later', 'now', 'please',
   'tomorrow', 'today', 'when', 'if', 'at', 'in', 'on', 'so', 'very', 'just', 'here', 'there',
   'and', 'but', 'still', 'really', 'actually', 'asha', 'what', 'who', 'why', 'how', 'something', 'anything',
 ]);
+
 function extractSpokenName(text: string): { field: 'name' | 'preferredName'; value: string } | null {
   const m = text.match(/\b(my name is|my name's|call me)\s+([A-Za-z][A-Za-z'-]{1,29})\b/i);
   if (!m) return null;
@@ -102,26 +90,11 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-const sarvamClient = new OpenAI({
-  apiKey: process.env.SARVAM_API_KEY!,
-  baseURL: 'https://api.sarvam.ai/v1',
-  defaultHeaders: { 'api-subscription-key': process.env.SARVAM_API_KEY! },
-  fetch: async (input: any, init?: any) => {
-    if (typeof init?.body === 'string') {
-      const body = JSON.parse(init.body);
-      body.reasoning_effort = null; // thinking off
-      init = { ...init, body: JSON.stringify(body) };
-    }
-    return fetch(input, init);
-  },
-});
-
 // Translate tool: only for simple non-medical text the caller asks for.
 const translateTool = llm.tool({
   description:
-    'Translate a short, non-medical sentence (greetings, directions, appointment wording) into another language. ' +
-    'Use ONLY when the caller explicitly asks. NEVER use it for medicines, doses, symptoms or health advice. ' +
-    "For normal conversation, answer directly in the caller's language.",
+    'Translate a short, non-medical sentence into another language. Use ONLY when the caller explicitly asks. ' +
+    'NEVER use it for medicines, doses, symptoms or health advice.',
   parameters: z.object({
     text: z.string().describe('The exact text to translate'),
     targetLanguage: z
@@ -142,7 +115,7 @@ const translateTool = llm.tool({
 // Time tool: the model cannot read a clock, so give it one.
 const timeTool = llm.tool({
   description:
-    'Get the current date, day and time in India. Use whenever the caller asks the time, date or day.',
+    'Get current date, day and time in India. Use whenever caller asks time, date or day.',
   parameters: z.object({}),
   execute: async () => {
     const now = new Date();
@@ -159,8 +132,8 @@ const timeTool = llm.tool({
 // Knowledge-base tool: result comes back as part of the conversation, so it always reaches the LLM.
 const clinicInfoTool = llm.tool({
   description:
-    'Look up clinic facts (timings, location, booking, doctors, fees, contact, anything else about the clinic) ' +
-    'from the clinic knowledge base. Use for ANY question about the clinic. Do NOT use for general questions.',
+    'Look up clinic facts (timings, location, booking, doctors, fees) from the clinic knowledge base. ' +
+    'Use for ANY question about the clinic.',
   parameters: z.object({
     question: z.string().describe("The caller's clinic question, in English if possible"),
   }),
@@ -172,7 +145,7 @@ const clinicInfoTool = llm.tool({
       if (!hits.length) {
         return {
           found: false,
-          note: 'No clinic information found. Say you do not have that detail and the clinic staff can confirm it.',
+          note: 'No clinic information found. Say you do not have that detail and clinic staff can confirm it.',
         };
       }
       return { found: true, info: hits.map((h: any) => h.text) };
@@ -180,7 +153,7 @@ const clinicInfoTool = llm.tool({
       console.warn('[kb] lookup failed:', e instanceof Error ? e.message : e);
       return {
         found: false,
-        note: 'Lookup unavailable. Say you could not check and the clinic staff can confirm it.',
+        note: 'Lookup unavailable. Say you could not check and clinic staff can confirm it.',
       };
     }
   },
@@ -195,11 +168,10 @@ export default defineAgent({
       console.warn('[records] index creation warning:', e instanceof Error ? e.message : e);
     }
     if (MEMORY_ENABLED) {
-      // Open the DB connection and the embedding client before the first caller arrives.
       try {
         await warmMemory();
       } catch (e) {
-        console.warn('[memory] warm-up failed (memory will retry on use):', e instanceof Error ? e.message : e);
+        console.warn('[memory] warm-up failed:', e instanceof Error ? e.message : e);
       }
     }
   },
@@ -215,7 +187,7 @@ export default defineAgent({
       vad: ctx.proc.userData.vad as silero.VAD,
       stt: new sarvam.STT({
         model: 'saaras:v3',
-        languageCode: AUTO ? 'unknown' : L.code, // 'unknown' = auto-detect
+        languageCode: AUTO ? 'unknown' : L.code,
       }),
       llm: new openai.LLM({
         model: 'sarvam-105b',
@@ -235,7 +207,7 @@ export default defineAgent({
     let ending = false;
     let connected = false;
 
-    // ---------- memory: who is this caller, and what did they say ----------
+    // ---------- memory: who is this caller ----------
     let rawCallerId = '';
     if (CALLER_ID_MODE === 'participant') {
       await ctx.connect();
@@ -246,7 +218,7 @@ export default defineAgent({
         throw new Error('[caller] CALLER_ID_MODE is "participant" but no participant userId or identity was found.');
       }
     } else if (CALLER_ID_MODE === 'fixed' || CALLER_ID_MODE === 'test') {
-      rawCallerId = process.env.TEST_CALLER_ID?.trim() ?? '';
+      rawCallerId = TEST_CALLER_ID;
       if (!rawCallerId) {
         throw new Error(`[caller] CALLER_ID_MODE is "${CALLER_ID_MODE}" but TEST_CALLER_ID is missing in .env.`);
       }
@@ -256,24 +228,39 @@ export default defineAgent({
 
     const { callerHash } = resolveCallerId(rawCallerId);
 
-    // Check if profile exists for startup logging and cached session initialization
-    const existingProfile = await withTimeout(getProfile(callerHash), MEMORY_LOAD_TIMEOUT_MS).catch(() => null);
-    console.log(
-      `[startup] rawId="${rawCallerId}", hashPrefix="${callerHash.slice(0, 8)}", CALLER_ID_MODE="${CALLER_ID_MODE}", profileFound=${Boolean(existingProfile)}`
-    );
-
-    // Update profile session metadata: lastSeenAt, callCount, schemaVersion
+    // Update profile session metadata asynchronously
     if (callerHash && RECORDS_ENABLED) {
       touchProfileSession(callerHash).catch((e) =>
-        console.warn('[records] touchProfileSession failed:', e instanceof Error ? e.message : e)
+        console.warn('[records] touchProfileSession failed:', e instanceof Error ? e.message : e),
       );
     }
-    // Unique per session, so a new session never counts as the previous call.
+
     const callId = `${ctx.room.name ?? 'unknown'}-${Date.now()}`;
     const transcriptLines: string[] = [];
     let userTurns = 0;
 
-    // Background snapshot every few caller turns, so a crash loses at most a few turns.
+    const transcript = new SessionTranscript(callId, callerHash, () => current);
+
+    // Parallel load of all caller history to minimize startup delay
+    const [profileRes, memsRes, contactsRes, incidentsRes, exchangesRes] = await Promise.allSettled([
+      callerHash && RECORDS_ENABLED ? withTimeout(getProfile(callerHash), MEMORY_LOAD_TIMEOUT_MS) : Promise.resolve(null),
+      callerHash && MEMORY_ENABLED ? withTimeout(recentMemories(callerHash, 4), MEMORY_LOAD_TIMEOUT_MS) : Promise.resolve([]),
+      callerHash && RECORDS_ENABLED ? withTimeout(listContacts(callerHash), MEMORY_LOAD_TIMEOUT_MS) : Promise.resolve([]),
+      callerHash && RECORDS_ENABLED ? withTimeout(getRecentIncidents(callerHash, 3), MEMORY_LOAD_TIMEOUT_MS) : Promise.resolve([]),
+      callerHash && RECALL_TRANSCRIPTS ? withTimeout(getRecentExchanges(callerHash, 6, callId), MEMORY_LOAD_TIMEOUT_MS) : Promise.resolve([]),
+    ]);
+
+    const existingProfile = profileRes.status === 'fulfilled' ? profileRes.value : null;
+    const mems = memsRes.status === 'fulfilled' ? memsRes.value : [];
+    const storedContacts = contactsRes.status === 'fulfilled' ? contactsRes.value : [];
+    const inc = incidentsRes.status === 'fulfilled' ? incidentsRes.value : [];
+    const prev = exchangesRes.status === 'fulfilled' ? exchangesRes.value : [];
+
+    console.log(
+      `[startup] hashPrefix="${callerHash.slice(0, 8)}", profileFound=${Boolean(existingProfile)}, mems=${mems.length}, contacts=${storedContacts.length}, incidents=${inc.length}, exchanges=${prev.length}`,
+    );
+
+    // Background snapshot every few caller turns
     let saving = false;
     const saveSnapshot = async () => {
       if (!callerHash || saving) return;
@@ -281,7 +268,7 @@ export default defineAgent({
       try {
         const t = transcriptLines.join('\n');
         await Promise.allSettled([
-          saveMemories(callerHash, current, t, callId),
+          MEMORY_ENABLED ? saveMemories(callerHash, current, t, callId) : Promise.resolve(0),
           RECORDS_ENABLED ? saveRecordFromTranscript(callerHash, current, t, callId) : Promise.resolve(),
         ]);
       } finally {
@@ -294,7 +281,6 @@ export default defineAgent({
       silenceTimer = undefined;
     };
 
-    // Say a short goodbye (TTS only, no LLM tokens), then close the session.
     const endCall = async (reason: string) => {
       if (ending) return;
       ending = true;
@@ -316,10 +302,9 @@ export default defineAgent({
     const armTimer = () => {
       clearTimer();
       if (ending) return;
-      silenceTimer = setTimeout(() => void endCall('silence'), SILENCE_MS);
+      silenceTimer = setTimeout(() => void endCall('silence'), SILENCE_TIMEOUT_MS);
     };
 
-    // Silence timer runs only while the agent is idle and the caller is quiet.
     (session as any).on('agent_state_changed', (ev: any) => {
       const s = ev?.newState ?? ev?.state;
       if (s === 'speaking' || s === 'thinking') clearTimer();
@@ -331,7 +316,6 @@ export default defineAgent({
       else if (s === 'listening') armTimer();
     });
 
-    // Voice only: log, detect "bye", and (auto mode) switch voice language.
     (session as any).on('user_input_transcribed', (ev: any) => {
       if (!ev?.isFinal || !ev.transcript) return;
       console.log(`[stt] "${ev.transcript}"`);
@@ -351,7 +335,7 @@ export default defineAgent({
       }
       const t: any = tts;
       if (typeof t.updateOptions !== 'function') {
-        console.warn('[lang] tts.updateOptions is not available in this plugin version');
+        console.warn('[lang] tts.updateOptions is not available');
         return;
       }
       t.updateOptions({ targetLanguageCode: n.code, speaker: n.speaker });
@@ -359,19 +343,18 @@ export default defineAgent({
       current = next;
     });
 
-    // Voice AND typed turns: collect the transcript, catch typed "bye", trigger snapshots.
     (session as any).on('conversation_item_added', (ev: any) => {
       const item = ev?.item;
       const role: string | undefined = item?.role;
       const text: string = (item?.textContent ?? '').trim();
       if (!text || (role !== 'user' && role !== 'assistant')) return;
 
+      transcript.add(role as 'user' | 'assistant', text);
+
       if (role === 'user') {
         userTurns++;
         if (isBye(text)) void endCall('caller said bye');
 
-        // Backup: save the name even if the model skipped the saveProfile tool.
-        // "my name is X" -> name, "call me X" -> preferredName.
         if (NAME_FALLBACK && callerHash && RECORDS_ENABLED) {
           const spoken = extractSpokenName(text);
           if (spoken) {
@@ -381,7 +364,7 @@ export default defineAgent({
           }
         }
 
-        if (callerHash && userTurns >= MEMORY_MIN_USER_TURNS && userTurns % SAVE_EVERY_TURNS === 0) {
+        if (callerHash && userTurns >= MEMORY_MIN_USER_TURNS && userTurns % MEMORY_SAVE_EVERY_TURNS === 0) {
           void saveSnapshot();
         }
       }
@@ -390,100 +373,56 @@ export default defineAgent({
       }
     });
 
-    // Safety net: never let a call run forever.
     maxTimer = setTimeout(() => void endCall('max duration'), MAX_CALL_MS);
 
     (ctx as any).addShutdownCallback?.(async () => {
       clearTimer();
       if (maxTimer) clearTimeout(maxTimer);
 
-      // Final save: only for real conversations, and never allowed to crash shutdown.
-      if (callerHash && userTurns >= MEMORY_MIN_USER_TURNS) {
-        const transcript = transcriptLines.join('\n');
-        const jobs: Promise<unknown>[] = [saveMemories(callerHash, current, transcript, callId)];
-        if (RECORDS_ENABLED) jobs.push(saveRecordFromTranscript(callerHash, current, transcript, callId));
+      await transcript.end();
 
-        const results = await Promise.allSettled(jobs);
-        const labels = ['notes', 'record'];
+      if (callerHash && userTurns >= MEMORY_MIN_USER_TURNS) {
+        const text = transcriptLines.join('\n');
+        const jobs: [string, Promise<unknown>][] = [];
+        if (MEMORY_ENABLED) jobs.push(['notes', saveMemories(callerHash, current, text, callId)]);
+        if (RECORDS_ENABLED) jobs.push(['record', saveRecordFromTranscript(callerHash, current, text, callId)]);
+
+        const results = await Promise.allSettled(jobs.map(([, p]) => p));
         results.forEach((r, i) => {
-          if (r.status === 'fulfilled') console.log(`[memory] ${labels[i]} saved:`, JSON.stringify(r.value));
-          else console.warn(`[memory] ${labels[i]} save failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
+          const label = jobs[i][0];
+          if (r.status === 'fulfilled') console.log(`[memory] ${label} saved:`, JSON.stringify(r.value));
+          else console.warn(`[memory] ${label} save failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
         });
       } else if (callerHash) {
         console.log(`[memory] not saved (only ${userTurns} caller turn(s), need ${MEMORY_MIN_USER_TURNS})`);
       }
     });
 
-    // ---------- build the instructions ----------
+    // ---------- build instructions (concise, minimal token overhead) ----------
     const baseInstructions = AUTO ? buildMultiPrompt(Object.values(LANGS)) : buildPrompt(L);
-    let instructions = ENABLE_TRANSLATE
-      ? `${baseInstructions}\n\nIf the caller explicitly asks you to translate a simple non-medical sentence, use the translateText tool and read the result aloud. For anything about medicines or health, follow the safety rules above and refer to a human.`
-      : baseInstructions;
+    let instructions = baseInstructions;
 
+    if (ENABLE_TRANSLATE) {
+      instructions += '\n\nIf asked to translate a simple non-medical sentence, use translateText.';
+    }
     if (ENABLE_KB) {
-      instructions +=
-        '\n\nFor any question about the clinic (timings, location, booking, doctors, fees, contact), ' +
-        'first call the lookupClinicInfo tool and answer only from its result. ' +
-        'If it finds nothing, say you do not have that detail and the clinic staff can confirm it. ' +
-        'For all other questions, do not call it; answer normally.';
+      instructions += '\n\nFor questions about the clinic (timings, doctors, location, fees), use lookupClinicInfo.';
     }
-
-    // Tells the LLM when to use the record tools. It never promises that staff will see anything.
+    if (RECALL_TRANSCRIPTS) {
+      instructions += '\n\nIf the caller refers to an earlier conversation, use recallConversation.';
+    }
     if (callerHash && RECORDS_ENABLED) {
       instructions +=
-        '\n\nRECORD KEEPING: The moment the caller says their name (for example "my name is Tom", "I am Tom"), ' +
-        'your first action must be to call saveProfile with { name }, before you say anything. ' +
-        'If they say how they want to be addressed (for example "call me Tom"), call saveProfile with { preferredName }. ' +
-        'Do the same for age, language preference, and allergies. ' +
-        'If the caller corrects or changes a detail, call saveProfile again right away with only the new value, before you reply. ' +
-        'Example: "actually call me Thomas" -> saveProfile({ preferredName: "Thomas" }); "my name is actually Thomas" -> saveProfile({ name: "Thomas" }). ' +
-        'If they say they do not have an allergy, call saveProfile({ removeAllergies: ["that allergy"] }). ' +
-        'Example: caller says "hi my name is tom" -> call saveProfile({ name: "Tom" }), then greet Tom warmly. ' +
-        'The user can also give the name, phone number, and/or email of anyone they want contacted. ' +
-        'Call saveContact to save them. Never refer to them as caregivers or carers. ' +
-        'If the user asks you to reach out to someone, call reachOut, but you MUST ALWAYS ask the user to explicitly confirm before sending or calling. ' +
-        'If they mention an emergency, injury, getting hurt, bleeding, a fall, severe pain or feeling unsafe, ' +
-        'call reportIncident immediately, even if the wording is short or vague, ' +
-        'then calmly tell them to call 112 if in immediate danger, or to contact the clinic directly. ' +
-        'Never diagnose. Never give medical advice or first-aid instructions. Do not announce that you are saving notes.';
+        '\n\nRecord caller details with saveProfile (name, preferredName, age, language, allergies) immediately when stated. ' +
+        'Save trusted contacts with saveContact. ' +
+        'Record emergencies, injuries, falls, or severe symptoms immediately with reportIncident.';
     }
 
-    // Load what we already know about this caller, once, at the start.
-    // If slow or failing, carry on without it.
-    if (callerHash && MEMORY_ENABLED) {
-      try {
-        const mems = await withTimeout(recentMemories(callerHash, 4), MEMORY_LOAD_TIMEOUT_MS);
-        console.log(`[memory] loaded ${mems.length} note(s)`);
-        instructions += formatMemoryBlock(mems);
-      } catch (e) {
-        console.warn('[memory] load skipped:', e instanceof Error ? e.message : e);
-      }
-    }
-
-    if (callerHash && RECORDS_ENABLED) {
-      if (existingProfile) {
-        console.log(`[records] profile loaded: ${Object.keys(existingProfile).join(', ')}`);
-        instructions += formatProfileBlock(existingProfile);
-      } else {
-        console.log('[records] profile loaded: none');
-      }
-
-      try {
-        const storedContacts = await withTimeout(listContacts(callerHash), MEMORY_LOAD_TIMEOUT_MS);
-        console.log(`[records] ${storedContacts.length} contact(s) loaded`);
-        instructions += formatContactsBlock(storedContacts);
-      } catch (e) {
-        console.warn('[records] contacts load skipped:', e instanceof Error ? e.message : e);
-      }
-
-      try {
-        const inc = await withTimeout(getRecentIncidents(callerHash, 3), MEMORY_LOAD_TIMEOUT_MS);
-        console.log(`[records] ${inc.length} recent incident(s) loaded`);
-        instructions += formatIncidentBlock(inc);
-      } catch (e) {
-        console.warn('[records] incident load skipped:', e instanceof Error ? e.message : e);
-      }
-    }
+    if (mems.length) instructions += formatMemoryBlock(mems);
+    if (existingProfile) instructions += formatProfileBlock(existingProfile);
+    if (storedContacts.length) instructions += formatContactsBlock(storedContacts);
+    if (inc.length) instructions += formatIncidentBlock(inc);
+    if (prev.length) instructions += formatTranscriptBlock(prev);
 
     const agent = voice.Agent.create({
       instructions,
@@ -492,6 +431,7 @@ export default defineAgent({
         ...(ENABLE_KB ? { lookupClinicInfo: clinicInfoTool } : {}),
         ...(ENABLE_TRANSLATE ? { translateText: translateTool } : {}),
         ...(callerHash && RECORDS_ENABLED ? buildRecordTools(callerHash, callId, () => current) : {}),
+        ...(callerHash && RECALL_TRANSCRIPTS ? { recallConversation: buildRecallTool(callerHash, callId) } : {}),
       },
     });
 
@@ -499,13 +439,17 @@ export default defineAgent({
 
     if (!connected) await ctx.connect();
 
-    session.generateReply({
-      instructions: `Say exactly this sentence and nothing else: ${L.phrases.greeting}`,
-    });
+    // Direct greeting via TTS — saves a full LLM turn + cold-start latency!
+    try {
+      await session.say(L.phrases.greeting);
+    } catch {
+      session.generateReply({
+        instructions: `Say exactly this sentence: ${L.phrases.greeting}`,
+      });
+    }
   },
 });
 
-// ONE runApp. AGENT_NAME defaults to 'hc-va'. Set AGENT_NAME= (blank) in .env for automatic dispatch.
 cli.runApp(
   new ServerOptions({
     agent: fileURLToPath(import.meta.url),

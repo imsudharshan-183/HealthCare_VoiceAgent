@@ -1,6 +1,6 @@
 # HealthCare_VoiceAgent
 
-A multilingual voice and chat health companion for elderly users. It is designed to be embedded in a mobile app and a website, where older adults can talk or chat to get general health information, receive medication and appointment reminders, and understand the results of health scans or reports they upload. If readings fall outside normal ranges, it advises the user to see a doctor and, with the user's consent, shares the findings with a linked caregiver application.
+A multilingual voice and chat health companion for elderly users. It is designed to be embedded in a mobile app and a website, where older adults can talk or chat to get general health information, receive medication and appointment reminders, and understand the results of health scans or reports they upload. If readings fall outside normal ranges, it advises the user to see a doctor and, with the user's consent, shares the findings with nominated contacts or clinic staff.
 
 Built with LiveKit Agents (Node.js / TypeScript), Sarvam AI for speech and language, and MongoDB Atlas for the knowledge base and user memory.
 
@@ -20,7 +20,7 @@ Built with LiveKit Agents (Node.js / TypeScript), Sarvam AI for speech and langu
 | Medication and appointment reminders | Planned |
 | Upload and explanation of scan results or reports | Planned |
 | Rule-based abnormality detection with severity levels | Planned |
-| Consent-based sharing with the caregiver application | Planned |
+| Consent-based sharing with nominated contacts | Planned |
 | Text chat interface alongside voice | Planned |
 | Mobile app and website integration | Planned |
 | Telephony (SIP) for phone calls | Planned |
@@ -31,7 +31,7 @@ Built with LiveKit Agents (Node.js / TypeScript), Sarvam AI for speech and langu
 - **Languages:** English, Hindi, Tamil, Kannada, Bengali, Marathi, Malayalam
 - **Health information (RAG):** answers from a curated knowledge base in `knowledge/` using MongoDB Atlas Vector Search
 - **Memory:** saves short notes about each user and loads them in later sessions
-- **Records:** stores user details (name, age, carer, allergies) and reports incidents such as falls or emergencies
+- **Records:** stores user details (name, age, contacts, allergies) and reports incidents such as falls or emergencies
 - **Tools:** current date and time, knowledge lookup, simple non-medical translation
 - **Call control:** silence timeout, maximum call length, goodbye detection
 
@@ -46,15 +46,15 @@ Built with LiveKit Agents (Node.js / TypeScript), Sarvam AI for speech and langu
    |        |         |
 Reminders  Results   Escalation
 scheduler  rules      + consent-based
-           engine     caregiver sharing
+           engine     contact notification
 ```
 
 ### Safety design for result explanations
 
 - **Flags come from code, not the LLM.** A rules engine compares readings with reference ranges and assigns a severity (normal, mild, severe). The LLM only explains the outcome in plain language.
 - **No diagnosis.** The agent says a reading is outside the usual range and suggests seeing a doctor. It does not name conditions.
-- **Severe findings escalate.** The agent urges the user to contact a doctor or emergency services, and notifies the caregiver if the user has consented.
-- **Consent first.** Sharing with a caregiver requires explicit consent that is stored, logged and revocable.
+- **Severe findings escalate.** The agent urges the user to contact a doctor or emergency services, and notifies contacts if the user has consented.
+- **Consent first.** Sharing with contacts requires explicit consent that is stored, logged and revocable.
 - **Transparency.** The agent identifies itself as an AI and states its limits at the start of a session.
 
 ## Project structure
@@ -173,7 +173,7 @@ Add your secrets (Sarvam key, MongoDB URI and the rest of `.env`) through LiveKi
 
 1. Medication and appointment reminders (scheduler, push or call-out)
 2. Result upload, with a rules engine and plain-language explanations
-3. Consent management and caregiver alerts
+3. Consent management and contact alerts
 4. Text chat interface and app/website embedding
 5. SIP telephony, semantic turn detection and noise cancellation
 6. Human handoff for emergencies

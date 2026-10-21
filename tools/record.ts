@@ -51,33 +51,25 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
   const saveProfileTool = llm.tool({
     description:
       'Save or update caller profile details (name, preferredName, age, language, allergies). ' +
-      'MUST be called the moment the caller states their name (e.g. "my name is Tom", "call me Tom"), ' +
-      'age, language preference, or allergies. Call it BEFORE you reply. ' +
-      'If the caller CORRECTS a detail (for example "actually call me Thomas" or "my name is Tom, not Lakshmi"), ' +
-      'call this again immediately with the new value. ' +
-      'Use removeAllergies only when the caller says they do not have an allergy. ' +
-      'Never include fields the caller did not state. Never overwrite with empty values. ' +
-      'Do not announce that you are saving anything.',
+      'Call the moment caller states or corrects their details, before replying.',
     parameters: ProfilePatch,
     execute: async (patch) => {
       try {
         const cleaned = cleanPatch(patch as Record<string, unknown>);
         if (!Object.keys(cleaned).length) {
-          return { saved: false, next: 'Nothing to save. Continue the conversation naturally.' };
+          return { saved: false, next: 'Nothing to save.' };
         }
         const r = await upsertProfile(callerId, cleaned as ProfilePatchT, getLang(), callId);
         console.log('[records] profile saved:', Object.keys(cleaned).join(', '));
         return {
           saved: true,
-          next: r?.conflict
-            ? 'This name differs from the one on file, so a new profile was started. Politely confirm the caller\'s name before using it. Do not mention saving.'
-            : 'Continue conversation naturally. If you now know their name, use it warmly. Do not mention that anything was saved.',
+          next: r?.conflict ? 'Name changed; confirm with caller.' : 'Saved. Continue naturally.',
         };
       } catch (err) {
         console.error('[records] profile save failed:', err);
         return {
           saved: false,
-          next: 'Continue conversation naturally. Do not mention any save error to the caller.',
+          next: 'Save failed silently. Continue.',
         };
       }
     },
@@ -86,15 +78,14 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
   const saveContactTool = llm.tool({
     description:
       'Save a contact person the caller wants kept on file (e.g. daughter, son, neighbor, doctor). ' +
-      "Must include the person's name and at least a phone number or email address. " +
-      'Call this whenever the caller provides contact details for someone they might want reached.',
+      'Requires name and at least a phone number or email address.',
     parameters: ContactInput,
     execute: async (input) => {
       try {
         if (!input.phone?.trim() && !input.email?.trim()) {
           return {
             saved: false,
-            next: `Ask the caller for a phone number or email address for ${input.name}, then save again.`,
+            next: `Ask for phone or email for ${input.name}.`,
           };
         }
         const saved = await saveContact(callerId, input);
@@ -102,28 +93,26 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
         return {
           saved: true,
           contact: { name: saved.name, relation: saved.relation },
-          next: `Acknowledge warmly that you have saved ${saved.name} in their contacts.`,
+          next: `Saved ${saved.name}. Acknowledge warmly.`,
         };
       } catch (err) {
         console.error('[records] contact save failed:', err);
         return {
           saved: false,
-          next: 'Continue conversation naturally without alerting the caller to a technical error.',
+          next: 'Save failed silently. Continue.',
         };
       }
     },
   });
 
   const listContactsTool = llm.tool({
-    description:
-      'List all stored contacts for this caller. Use when the caller asks who you have on file, ' +
-      'or who can be contacted.',
+    description: 'List all stored contacts for this caller.',
     parameters: z.object({}),
     execute: async () => {
       try {
         const all = await listContacts(callerId);
         if (!all.length) {
-          return { found: false, message: 'No contacts on file for this caller.' };
+          return { found: false, message: 'No contacts on file.' };
         }
         return {
           found: true,
@@ -142,8 +131,7 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
   });
 
   const removeContactTool = llm.tool({
-    description:
-      'Remove a stored contact by name when the caller asks to delete or remove them from their file.',
+    description: 'Remove a stored contact by name.',
     parameters: z.object({
       name: z.string().describe('Name of the contact to remove'),
     }),
@@ -164,10 +152,8 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
 
   const reachOutTool = llm.tool({
     description:
-      'Reach out to a stored contact via sms, email, or call on behalf of the user. ' +
-      'IMPORTANT RULE: You MUST ask the user to explicitly confirm before dispatching. ' +
-      'First call this tool with confirmed=false to check details, then ask the user to confirm. ' +
-      'Once the user says yes, call it again with confirmed=true.',
+      'Reach out to a stored contact via sms, email, or call. ' +
+      'Requires explicit user confirmation before dispatching.',
     parameters: z.object({
       contactName: z.string().describe('Name of the contact to reach out to'),
       channel: z.enum(['sms', 'email', 'call']).describe('Channel to reach out: sms, email, or call'),
@@ -183,7 +169,7 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
         if (!contact) {
           return {
             status: 'not_found',
-            next: `No contact named "${contactName}" is on file. Ask the user for their phone number or email first.`,
+            next: `No contact "${contactName}". Ask for details.`,
           };
         }
 
@@ -191,7 +177,7 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
         if (!destination) {
           return {
             status: 'missing_destination',
-            next: `Contact "${contact.name}" is on file, but has no ${channel === 'email' ? 'email' : 'phone number'}. Ask the user for it first.`,
+            next: `${contact.name} has no ${channel === 'email' ? 'email' : 'phone'}. Ask for it.`,
           };
         }
 
@@ -205,25 +191,24 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
             contactName: contact.name,
             channel,
             message,
-            next: `Ask the caller explicitly: "Would you like me to send this ${channel} to ${contact.name} saying: '${message}'?" Do not send until they confirm.`,
+            next: `Confirm with caller before sending ${channel} to ${contact.name}.`,
           };
         }
 
         const finalMessage = pendingReach.get(key) ?? message;
         pendingReach.delete(key);
 
-        // Provider not integrated yet: simulate. Never log the full destination.
         console.log(`[reachOut] SIMULATED: channel=${channel}, to="${contact.name}" (${maskDest(destination)})`);
         return {
           status: 'dispatched',
           message: finalMessage,
-          next: `Inform the caller warmly that the ${channel} to ${contact.name} has been sent.`,
+          next: `${channel} to ${contact.name} sent. Inform caller.`,
         };
       } catch (err) {
         console.error('[reachOut] reachOut failed:', err);
         return {
           status: 'error',
-          next: 'Apologise briefly and let the caller know you could not send the message right now.',
+          next: 'Send failed. Apologise briefly.',
         };
       }
     },
@@ -231,10 +216,8 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
 
   const reportIncidentTool = llm.tool({
     description:
-      'Record an emergency, injury, fall, getting hurt, bleeding, severe pain, feeling unsafe, mental-health concern, ' +
-      'or medication problem that the caller reports. Call it IMMEDIATELY when the caller mentions one, ' +
-      'even if the wording is short or vague (for example "I got hurt"), before anything else. ' +
-      'Describe only what the caller said. Do not diagnose and do not include medicine names or doses.',
+      'Record an emergency, injury, fall, severe pain, feeling unsafe, or medication issue reported by caller. ' +
+      'Call IMMEDIATELY without diagnosing or giving medical advice.',
     parameters: IncidentInput,
     execute: async (incident) => {
       try {
@@ -242,15 +225,13 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
         console.log(`[records] incident saved: ${incident.type} / ${incident.severity}`);
         return {
           saved: true,
-          next:
-            'Stay calm and kind. If the caller may be in immediate danger, tell them to call the emergency number 112 now. ' +
-            'Otherwise advise contacting the clinic directly. Do not give medical advice, first-aid instructions or a diagnosis.',
+          next: 'If in danger, say call 112. Else advise clinic.',
         };
       } catch (err) {
         console.error('[records] incident save failed:', err);
         return {
           saved: false,
-          next: 'Tell the caller to call 112 if in immediate danger, or to contact the clinic directly.',
+          next: 'Tell caller: call 112 or contact clinic.',
         };
       }
     },
@@ -258,7 +239,6 @@ export function buildRecordTools(callerId: string, callId: string, getLang: () =
 
   return {
     saveProfile: saveProfileTool,
-    saveCallerDetails: saveProfileTool, // backward compatibility alias
     saveContact: saveContactTool,
     listContacts: listContactsTool,
     removeContact: removeContactTool,

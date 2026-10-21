@@ -40,7 +40,8 @@
     "kb:test": "tsx rag/kb-test.ts",
     "records:test": "tsx memory/records-test.ts",
     "records:show": "tsx memory/records-show.ts",
-    "profile:reset": "tsx memory/profile-reset.ts"
+    "profile:reset": "tsx memory/profile-reset.ts",
+    "profile:selftest": "tsx memory/profile-selftest.ts"
   },
   "keywords": [],
   "author": "",
@@ -48,7 +49,7 @@
   "dependencies": {
     "@livekit/agents": "^1.9.1",
     "@livekit/agents-plugin-openai": "^1.9.1",
-    "@livekit/agents-plugin-sarvam": "^1.9.1",
+    "@livekit/agents-plugin-sarvam": "~1.9.1",
     "@livekit/agents-plugin-silero": "^1.9.1",
     "@livekit/noise-cancellation-node": "^0.3.0",
     "dotenv": "^18.0.5",

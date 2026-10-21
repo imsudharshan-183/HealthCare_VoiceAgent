@@ -1,0 +1,4 @@
+allowBuilds:
+  '@livekit/local-inference': true
+  esbuild: true
+  onnxruntime-node: true
